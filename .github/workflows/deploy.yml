@@ -1,68 +1,45 @@
-name: Deploy to AWS EC2 t3.micro
+name: Deploy to AWS EC2
 
 on:
   push:
     branches: [ main ]
 
-env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: gohardevops-project
-
 jobs:
   deploy:
-    name: Deploy to t3.micro
+    name: Deploy
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
-
-    - name: Build and push Docker image
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-    - name: Deploy to t3.micro EC2
+    - name: Deploy to EC2
       uses: appleboy/ssh-action@v1.0.0
       with:
         host: ${{ secrets.EC2_HOST }}
         username: ec2-user
         key: ${{ secrets.EC2_SSH_KEY }}
         script: |
-          # Login to ECR
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+          # Navigate to project directory
+          cd /home/ec2-user
           
-          # Pull latest image
-          docker pull ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          # Clone or pull latest code
+          if [ -d "gohardevops-project" ]; then
+            cd gohardevops-project
+            git pull origin main
+          else
+            git clone https://github.com/your-username/gohardevops-project.git
+            cd gohardevops-project
+          fi
+          
+          # Build Docker image
+          docker build -t portfolio-app .
           
           # Stop and remove old container
           docker stop portfolio-container || true
           docker rm portfolio-container || true
           
-          # Run new container with resource limits for t3.micro
-          docker run -d \
-            --name portfolio-container \
-            --restart unless-stopped \
-            -p 80:5000 \
-            --memory=512m \
-            --cpus=0.5 \
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          # Run new container
+          docker run -d --name portfolio-container -p 80:5000 portfolio-app
           
-          # Clean up old images to save space
-          docker image prune -f
+          echo "Deployment completed successfully!"
