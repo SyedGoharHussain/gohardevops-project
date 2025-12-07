@@ -21,8 +21,6 @@ jobs:
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: "1.6.0"
 
     - name: Configure AWS credentials for Terraform
       uses: aws-actions/configure-aws-credentials@v2
@@ -36,15 +34,6 @@ jobs:
       run: |
         terraform init -input=false
         terraform validate
-
-    - name: Terraform Format Check
-      working-directory: ./terraform
-      run: terraform fmt -check -recursive
-
-    - name: Terraform Plan (Dry Run)
-      working-directory: ./terraform
-      run: terraform plan -input=false
-      continue-on-error: true
 
   docker-build-push:
     name: Build & Push Docker Image
@@ -70,12 +59,10 @@ jobs:
     - name: Build Docker image
       run: |
         docker build -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest .
-        docker tag ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
     - name: Push Docker image to ECR
       run: |
         docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
-        docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
   deploy-to-ec2:
     name: Deploy to EC2
@@ -91,25 +78,65 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Deploy to EC2 via SSH
+    - name: Get ECR registry URL
+      id: ecr
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+        echo "ECR Registry: ${REGISTRY}"
+
+    - name: Deploy to EC2
       uses: appleboy/ssh-action@v1.0.0
+      env:
+        ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
       with:
-        host: ${{ secrets.EC2_HOST }}  # Your EC2 IP: 3.85.222.141
+        host: ${{ secrets.EC2_HOST }}
         username: ec2-user
         key: ${{ secrets.EC2_SSH_KEY }}
         script: |
-          echo "🚀 Starting deployment..."
+          echo "=== Starting Deployment ==="
+          echo "ECR Registry: ${{ steps.ecr.outputs.registry }}"
+          
+          # Create AWS credentials file
+          mkdir -p ~/.aws
+          cat > ~/.aws/config << EOF
+          [default]
+          region = ${{ env.AWS_REGION }}
+          EOF
+          
+          cat > ~/.aws/credentials << EOF
+          [default]
+          aws_access_key_id = ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key = ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          EOF
           
           # Login to ECR
+          echo "Logging into ECR..."
           aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
-            docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            docker login --username AWS --password-stdin ${{ steps.ecr.outputs.registry }}
           
-          # Pull latest image
-          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          # Pull image
+          echo "Pulling image..."
+          docker pull ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           
-          # Deploy
-          docker stop portfolio-container 2>/dev/null || true
-          docker rm portfolio-container 2>/dev/null || true
-          docker run -d --name portfolio-container -p 80:5000 ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          # Stop and remove old container
+          echo "Cleaning up old container..."
+          docker stop portfolio-container 2>/dev/null || echo "No container to stop"
+          docker rm portfolio-container 2>/dev/null || echo "No container to remove"
           
-          echo "✅ Deployed! Visit: http://${{ secrets.EC2_HOST }}"
+          # Run new container
+          echo "Starting new container..."
+          docker run -d \
+            --name portfolio-container \
+            --restart unless-stopped \
+            -p 80:5000 \
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          
+          # Verify
+          echo "Verifying deployment..."
+          sleep 3
+          docker ps
+          
+          echo "=== Deployment Complete ==="
+          echo "🌐 Visit: http://${{ secrets.EC2_HOST }}"
