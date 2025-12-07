@@ -1,15 +1,20 @@
-FROM python:3.11-slim
+FROM python:3.9-alpine
 
 WORKDIR /app
+
+# Install dependencies
+RUN apk add --no-cache --virtual .build-deps gcc musl-dev \
+    && pip install --no-cache-dir gunicorn==21.2.0
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Remove build dependencies to keep image small
+RUN apk del .build-deps gcc musl-dev
 
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+COPY . .
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "wsgi:app"]
+# Optimize Gunicorn for t3.micro (1GB RAM)
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "2", "--worker-class", "sync", "run:app"]

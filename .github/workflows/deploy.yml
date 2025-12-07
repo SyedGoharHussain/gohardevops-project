@@ -1,63 +1,68 @@
-name: Deploy to EC2
+name: Deploy to AWS EC2 t3.micro
 
 on:
   push:
     branches: [ main ]
 
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: gohardevops-project
+
 jobs:
-  build-and-deploy:
+  deploy:
+    name: Deploy to t3.micro
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v4
-    
-    - name: Build Docker image
-      run: |
-        docker build -t syedgoharhussain/gohardevops-project:latest .
-    
-    - name: Push to Docker Hub
-      run: |
-        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-        docker push syedgoharhussain/gohardevops-project:latest
-    
-    - name: Deploy to EC2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build and push Docker image
       env:
-        EC2_HOST: ${{ secrets.EC2_HOST }}
-        EC2_USER: ${{ secrets.EC2_USER }}
-        SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+        IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Create SSH key file
-        echo "$SSH_KEY" > private_key.pem
-        chmod 600 private_key.pem
-        
-        # Create deployment script
-        cat > deploy.sh << 'EOF'
-        #!/bin/bash
-        echo "=== Automated Deployment ==="
-        
-        # Pull latest image
-        docker pull syedgoharhussain/gohardevops-project:latest
-        
-        # Stop and remove old container
-        docker stop flask-app 2>/dev/null || true
-        docker rm flask-app 2>/dev/null || true
-        
-        # Run new container
-        docker run -d \
-          --name flask-app \
-          -p 80:5000 \
-          -p 5000:5000 \
-          --restart always \
-          syedgoharhussain/gohardevops-project:latest
-        
-        echo "=== Deployment Complete ==="
-        docker ps
-        EOF
-        
-        # Copy and execute on EC2
-        scp -i private_key.pem -o StrictHostKeyChecking=no deploy.sh $EC2_USER@$EC2_HOST:/tmp/
-        ssh -i private_key.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "chmod +x /tmp/deploy.sh && /tmp/deploy.sh"
-        
-        # Cleanup
-        rm -f private_key.pem deploy.sh
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Deploy to t3.micro EC2
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ec2-user
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Login to ECR
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+          
+          # Pull latest image
+          docker pull ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          
+          # Stop and remove old container
+          docker stop portfolio-container || true
+          docker rm portfolio-container || true
+          
+          # Run new container with resource limits for t3.micro
+          docker run -d \
+            --name portfolio-container \
+            --restart unless-stopped \
+            -p 80:5000 \
+            --memory=512m \
+            --cpus=0.5 \
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          
+          # Clean up old images to save space
+          docker image prune -f
