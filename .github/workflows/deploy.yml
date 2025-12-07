@@ -1,45 +1,81 @@
-name: Deploy to AWS EC2
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
-  deploy:
-    name: Deploy
+  terraform-validate:
+    name: Terraform Validate
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+
+    - name: Terraform Validate
+      working-directory: ./terraform
+      run: terraform validate
+
+    - name: Terraform Plan
+      working-directory: ./terraform
+      run: terraform plan
+      continue-on-error: true  # Don't fail if there are changes
+
+  docker-deploy:
+    name: Build and Deploy
+    needs: terraform-validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    # YOUR EXISTING STEPS HERE (keep unchanged)
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: gohardevops-project
+        IMAGE_TAG: latest
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
     - name: Deploy to EC2
       uses: appleboy/ssh-action@v1.0.0
       with:
-        host: ${{ secrets.EC2_HOST }}
+        host: 3.85.222.141
         username: ec2-user
         key: ${{ secrets.EC2_SSH_KEY }}
         script: |
-          # Navigate to project directory
-          cd /home/ec2-user
+          # Login to ECR
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
           
-          # Clone or pull latest code
-          if [ -d "gohardevops-project" ]; then
-            cd gohardevops-project
-            git pull origin main
-          else
-            git clone https://github.com/your-username/gohardevops-project.git
-            cd gohardevops-project
-          fi
+          # Pull and deploy
+          docker pull ${{ steps.login-ecr.outputs.registry }}/gohardevops-project:latest
+          docker stop portfolio-container 2>/dev/null || true
+          docker rm portfolio-container 2>/dev/null || true
+          docker run -d --name portfolio-container -p 80:5000 ${{ steps.login-ecr.outputs.registry }}/gohardevops-project:latest
           
-          # Build Docker image
-          docker build -t portfolio-app .
-          
-          # Stop and remove old container
-          docker stop portfolio-container || true
-          docker rm portfolio-container || true
-          
-          # Run new container
-          docker run -d --name portfolio-container -p 80:5000 portfolio-app
-          
-          echo "Deployment completed successfully!"
+          echo "✅ Deployed to: http://3.85.222.141"
