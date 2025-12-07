@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: Terraform + Docker CI/CD Pipeline
 
 on:
   push:
@@ -6,40 +6,54 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: gohardevops-project
+
 jobs:
   terraform-validate:
-    name: Terraform Validate
+    name: Terraform Infrastructure Validation
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout
+    - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: "1.6.0"
 
-    - name: Terraform Init
+    - name: Configure AWS credentials for Terraform
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Terraform Init & Validate
       working-directory: ./terraform
-      run: terraform init
+      run: |
+        terraform init -input=false
+        terraform validate
 
-    - name: Terraform Validate
+    - name: Terraform Format Check
       working-directory: ./terraform
-      run: terraform validate
+      run: terraform fmt -check -recursive
 
-    - name: Terraform Plan
+    - name: Terraform Plan (Dry Run)
       working-directory: ./terraform
-      run: terraform plan
-      continue-on-error: true  # Don't fail if there are changes
+      run: terraform plan -input=false
+      continue-on-error: true
 
-  docker-deploy:
-    name: Build and Deploy
-    needs: terraform-validate
+  docker-build-push:
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
+    needs: terraform-validate
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     
     steps:
-    # YOUR EXISTING STEPS HERE (keep unchanged)
-    - name: Checkout
+    - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Configure AWS credentials
@@ -47,35 +61,55 @@ jobs:
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1
+        aws-region: ${{ env.AWS_REGION }}
 
     - name: Login to Amazon ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v1
 
-    - name: Build, tag, and push image to Amazon ECR
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: gohardevops-project
-        IMAGE_TAG: latest
+    - name: Build Docker image
       run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker build -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest .
+        docker tag ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
-    - name: Deploy to EC2
+    - name: Push Docker image to ECR
+      run: |
+        docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+        docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+  deploy-to-ec2:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Deploy to EC2 via SSH
       uses: appleboy/ssh-action@v1.0.0
       with:
-        host: 3.85.222.141
+        host: ${{ secrets.EC2_HOST }}  # Your EC2 IP: 3.85.222.141
         username: ec2-user
         key: ${{ secrets.EC2_SSH_KEY }}
         script: |
-          # Login to ECR
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+          echo "🚀 Starting deployment..."
           
-          # Pull and deploy
-          docker pull ${{ steps.login-ecr.outputs.registry }}/gohardevops-project:latest
+          # Login to ECR
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+            docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+          
+          # Pull latest image
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          
+          # Deploy
           docker stop portfolio-container 2>/dev/null || true
           docker rm portfolio-container 2>/dev/null || true
-          docker run -d --name portfolio-container -p 80:5000 ${{ steps.login-ecr.outputs.registry }}/gohardevops-project:latest
+          docker run -d --name portfolio-container -p 80:5000 ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           
-          echo "✅ Deployed to: http://3.85.222.141"
+          echo "✅ Deployed! Visit: http://${{ secrets.EC2_HOST }}"

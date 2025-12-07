@@ -5,51 +5,83 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  backend "local" {
+    path = "terraform.tfstate"
+  }
 }
 
 provider "aws" {
   region = "us-east-1"
-   access_key = "AKIAYKFQRE6UGZDDZ6DE"       # Not recommended for commits
-  secret_key = "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"  
 }
 
-# RESOURCE DEFINITION (required for import)
+# Security Group
 resource "aws_security_group" "existing_sg" {
   name        = "launch-wizard-1"
-  description = "Managed by Terraform"
-  
-  # Add these to match your existing SG
+  description = "launch-wizard-1 created 2025-12-07T16:11:14.164Z"
+  vpc_id      = "vpc-005011d1b522ff251"
+
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  
+
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  
+
   ingress {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  
+
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = {}
 }
 
-# RESOURCE DEFINITION for EC2
+# EC2 Instance
 resource "aws_instance" "portfolio" {
-  # Leave empty - will be populated by import
-  # Terraform will fill this from imported state
+  ami           = "ami-0fa3fe0fa7920f68e"
+  instance_type = "t3.micro"
+  key_name      = "gohardevops"
+  subnet_id     = "subnet-0633cc42f49db6fad"
+
+  vpc_security_group_ids = [aws_security_group.existing_sg.id]
+
+  tags = {
+    Name = "gohar-devops"
+  }
+
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 8
+    encrypted   = false
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  credit_specification {
+    cpu_credits = "unlimited"
+  }
+}
+
+output "website_url" {
+  value = "http://3.85.222.141"
 }
