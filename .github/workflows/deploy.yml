@@ -139,4 +139,4 @@ jobs:
           docker ps
           
           echo "=== Deployment Complete ==="
-          echo "🌐 Visit: http://${{ secrets.EC2_HOST }}"
+          echo " Visit: http://${{ secrets.EC2_HOST }}"
